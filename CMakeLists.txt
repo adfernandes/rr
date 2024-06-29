@@ -25,6 +25,15 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
   endif()
 endif()
 
+option(INSTALL_TESTSUITE "Install the testsuite")
+option(force32bit "Force a 32-bit rr build, rather than both 64 and 32-bit. rr will only be able to record and replay 32-bit processes.")
+option(disable32bit "On a 64-bit platform, avoid requiring a 32-bit cross-compilation toolchain by not building 32-bit components. rr will be able to record 32-bit processes but not replay them.")
+option(staticlibs "Force usage of static linkage for non-standard libraries like capnproto")
+option(bpf "Enable bpf acceleration")
+option(asan "Build with address sanitizer enabled.")
+option(intel_pt_decoding "Build with Intel PT decoding enabled.")
+option(strip "Strip debug info from rr binary")
+
 enable_testing()
 set(BUILD_SHARED_LIBS ON)
 
@@ -34,7 +43,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(BUILD_TESTS ON CACHE BOOL "Build tests")
 set(WILL_RUN_TESTS ${BUILD_TESTS} CACHE BOOL "Run tests")
-option(INSTALL_TESTSUITE "Install the testsuite")
 
 # CAREFUL!  "-" is an invalid character in RPM package names, while
 # debian is happy with it.  However, "_" is illegal in debs, while RPM
@@ -152,9 +160,6 @@ if (CMAKE_ASM_COMPILER_ID STREQUAL "Clang" AND NOT ANDROID)
   set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} -fno-integrated-as")
 endif()
 
-option(force32bit "Force a 32-bit rr build, rather than both 64 and 32-bit. rr will only be able to record and replay 32-bit processes.")
-option(disable32bit "On a 64-bit platform, avoid requiring a 32-bit cross-compilation toolchain by not building 32-bit components. rr will be able to record 32-bit processes but not replay them.")
-
 if(force32bit)
   set(rr_32BIT true)
   set(rr_64BIT false)
@@ -173,8 +178,6 @@ else()
   endif()
   set(rr_MBITNESS_OPTION)
 endif()
-
-option(staticlibs "Force usage of static linkage for non-standard libraries like capnproto")
 
 # Check that compiling 32-bit code on a 64-bit target works, if required.
 if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64" AND rr_32BIT)
@@ -226,6 +229,24 @@ set(REQUIRED_LIBS
 # zlib is required to handle ELF compression
   zlib
 )
+
+if(NOT ANDROID)
+  set(REQUIRED_LIBS
+    ${REQUIRED_LIBS}
+    # zstd is required to handle ELF compression, but isn't available on Android.
+    libzstd
+  )
+  set(ZSTD 1)
+  add_definitions(-DZSTD=1)
+endif()
+
+if(bpf)
+  add_definitions(-DBPF=1)
+  set(REQUIRED_LIBS
+    ${REQUIRED_LIBS}
+    libbpf
+  )
+endif(bpf)
 
 foreach(required_lib ${REQUIRED_LIBS})
   string(TOUPPER ${required_lib} PKG)
@@ -569,8 +590,8 @@ set(RR_SOURCES
   src/FileNameCommand.cc
   src/Flags.cc
   src/ftrace.cc
-  src/GdbCommand.cc
-  src/GdbCommandHandler.cc
+  src/DebuggerExtensionCommand.cc
+  src/DebuggerExtensionCommandHandler.cc
   src/GdbServerConnection.cc
   src/GdbServerExpression.cc
   src/GdbInitCommand.cc
@@ -582,6 +603,7 @@ set(RR_SOURCES
   src/kernel_metadata.cc
   src/launch_debugger.cc
   src/log.cc
+  src/LldbInitCommand.cc
   src/LsCommand.cc
   src/main.cc
   src/MagicSaveDataMonitor.cc
@@ -640,7 +662,6 @@ if (x86ish)
   set(RR_SOURCES ${RR_SOURCES} src/test/x86/cpuid_loop.S)
 endif()
 
-option(asan "Build with address sanitizer enabled.")
 if (asan)
   set(ASAN_FLAGS "-fsanitize=address -fno-omit-frame-pointer")
       # Without no-omit-frame-pointer incomplete backtraces get stored.
@@ -669,7 +690,6 @@ else()
   set(CMAKE_INSTALL_INCLUDEDIR "include")
 endif()
 
-option(intel_pt_decoding "Build with Intel PT decoding enabled.")
 if (intel_pt_decoding)
   set(RR_SOURCES ${RR_SOURCES} src/ProcessorTraceDecoder.cc)
   add_definitions(-DINTEL_PT_DECODING=1)
@@ -681,7 +701,18 @@ post_build_executable(rr)
 set(RR_BIN rr)
 add_dependencies(rr Generated)
 
-option(strip "Strip debug info from rr binary")
+if(bpf)
+  add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/share/rr/async_event_filter.o
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf/async_event_filter.c
+    COMMAND clang -g -target bpf -Wall -O2 -c ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf/async_event_filter.c -o ${CMAKE_CURRENT_BINARY_DIR}/share/rr/async_event_filter.o)
+
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/share/rr/async_event_filter.o
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/rr)
+
+  add_custom_target(BPF DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/share/rr/async_event_filter.o)
+
+  add_dependencies(rr BPF)
+endif()
 
 set(RR_MAIN_LINKER_FLAGS ${LINKER_FLAGS})
 if(strip)
@@ -713,12 +744,17 @@ endif()
 target_link_libraries(rr
   ${CMAKE_DL_LIBS}
   ${ZLIB_LDFLAGS}
+  ${LIBBPF_LDFLAGS}
   brotli
 )
 
+if(ZSTD)
+  target_link_libraries(rr ${LIBZSTD_LDFLAGS})
+endif()
+
 if(staticlibs)
   # Urgh ... this might not work for everyone, but there doesn't seem to be
-  # a way to persuade pkg-confing/pkg_check_modules to produce the right flags
+  # a way to persuade pkg-config/pkg_check_modules to produce the right flags
   target_link_libraries(rr -L/home/roc/lib -l:libcapnp.a -l:libkj.a)
   # Note that this works for both clang++ and g++
   set(RR_MAIN_LINKER_FLAGS "-static-libstdc++ ${RR_MAIN_LINKER_FLAGS}")
@@ -1204,13 +1240,13 @@ set(BASIC_TESTS
   ptrace_attach_thread_running
   ptrace_breakpoint
   ptrace_change_patched_syscall
-  ptrace_waiter_thread
   x86/ptrace_debug_regs
   ptrace_exec
   x86/ptrace_exec32
   ptrace_kill_grandtracee
   x86/ptrace_tls
   ptrace_seize
+  ptrace_sigchld
   ptrace_sigchld_blocked
   ptrace_signals
   ptrace_singlestep
@@ -1221,6 +1257,7 @@ set(BASIC_TESTS
   ptrace_trace_clone
   ptrace_trace_exit
   ptrace_traceme
+  ptrace_waiter_thread
   ptracer_death
   ptracer_death_multithread
   ptracer_death_multithread_peer
@@ -1634,6 +1671,7 @@ set(TESTS_WITHOUT_PROGRAM
   call_exit
   check_patched_pthread
   checkpoint_async_signal_syscalls_1000
+  checkpoint_invalid
   checkpoint_mmap_shared
   checkpoint_prctl_name
   checkpoint_simple

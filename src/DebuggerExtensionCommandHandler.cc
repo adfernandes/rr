@@ -1,7 +1,7 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
-#include "GdbCommandHandler.h"
-#include "GdbCommand.h"
+#include "DebuggerExtensionCommandHandler.h"
+#include "DebuggerExtensionCommand.h"
 #include "log.h"
 
 #include <sstream>
@@ -13,35 +13,30 @@ namespace rr {
 
 // HashMap would be better here but the unordered_map API is annoying
 // and linear search is fine.
-static vector<GdbCommand*>* gdb_command_list;
+static vector<DebuggerExtensionCommand*>* debugger_command_list;
 
-static string gdb_macro_binding(const GdbCommand& cmd) {
-  string auto_args_str = "[";
-  for (size_t i = 0; i < cmd.auto_args().size(); i++) {
+static void print_python_string_array(ostream& out, const std::vector<std::string>& strs) {
+  out << "[";
+  for (size_t i = 0; i < strs.size(); i++) {
     if (i > 0) {
-      auto_args_str += ", ";
+      out << ", ";
     }
-    auto_args_str += "'" + cmd.auto_args()[i] + "'";
+    out << "'" << strs[i] << "'";
   }
-  auto_args_str += "]";
-  string ret = "python RRCmd('" + cmd.name() + "', " + auto_args_str + ")\n";
-  if (!cmd.docs().empty()) {
-    ret += "document " + cmd.name() + "\n" + cmd.docs() + "\nend\n";
-  }
-  return ret;
+  out << "]";
 }
 
-/* static */ string GdbCommandHandler::gdb_macros() {
-  GdbCommand::init_auto_args();
-  stringstream ss;
-  ss << string(R"Delimiter(
+static void gdb_macro_binding(ostream& out, const DebuggerExtensionCommand& cmd) {
+  out << "python RRCmd('" << cmd.name() << "', ";
+  print_python_string_array(out, cmd.auto_args());
+  out << ")\n";
+  if (!cmd.docs().empty()) {
+    out << "document " << cmd.name() << "\n" << cmd.docs() << "\nend\n";
+  }
+}
 
-set python print-stack full
-python
-
-import re
-
-def gdb_unescape(string):
+static const char shared_python[] = R"Delimiter(
+def hex_unescape(string):
     str_len = len(string)
     if str_len % 2: # check for unexpected string length
         return ""
@@ -56,13 +51,25 @@ def gdb_unescape(string):
         return ""
     return result.decode('utf-8')
 
-def gdb_escape(string):
+def hex_escape(string):
     result = ""
     for curr_char in string.encode('utf-8'):
         if isinstance(curr_char, str):
             curr_char = ord(curr_char)
         result += format(curr_char, '02x')
     return result
+
+)Delimiter";
+
+string DebuggerExtensionCommandHandler::gdb_macros() {
+  DebuggerExtensionCommand::init_auto_args();
+  stringstream ss;
+  ss << R"Delimiter(set python print-stack full
+python
+)Delimiter"
+    << shared_python
+    << R"Delimiter(
+import re
 
 class RRWhere(gdb.Command):
     """Helper to get the location for checkpoints/history. Used by auto-args"""
@@ -116,15 +123,15 @@ class RRCmd(gdb.Command):
             (self.cmd_name, -1 if curr_thread is None else curr_thread.ptid[1]))
         arg_strs = []
         for auto_arg in self.auto_args:
-            arg_strs.append(":" + gdb_escape(gdb.execute(auto_arg, to_string=True)))
+            arg_strs.append(":" + hex_escape(gdb.execute(auto_arg, to_string=True)))
         for arg in args:
-            arg_strs.append(":" + gdb_escape(arg))
+            arg_strs.append(":" + hex_escape(arg))
         rv = gdb.execute(cmd_prefix + ''.join(arg_strs), to_string=True);
         rv_match = re.search('received: "(.*)"', rv, re.MULTILINE);
         if not rv_match:
             gdb.write("Response error: " + rv)
             return
-        response = gdb_unescape(rv_match.group(1))
+        response = hex_unescape(rv_match.group(1))
         if response != '\n':
             gdb.write(response)
 
@@ -163,11 +170,11 @@ RRSetSuppressRunHook()
 gdb.events.stop.connect(history_push)
 
 end
-)Delimiter");
+)Delimiter";
 
-  if (gdb_command_list) {
-    for (auto& it : *gdb_command_list) {
-      ss << gdb_macro_binding(*it);
+  if (debugger_command_list) {
+    for (auto& it : *debugger_command_list) {
+      gdb_macro_binding(ss, *it);
     }
   }
 
@@ -186,11 +193,82 @@ end
   return ss.str();
 }
 
-/*static*/ GdbCommand* GdbCommandHandler::command_for_name(const string& name) {
-  if (!gdb_command_list) {
+static void lldb_macro_binding(ostream& ss, const DebuggerExtensionCommand& cmd) {
+  string func_name = "rr_command_";
+  for (char ch : cmd.name()) {
+    if (ch == ' ') {
+      // We don't support commands with spaces in LLDB yet
+      return;
+    }
+    if (ch == '-') {
+      ch = '_';
+    }
+    func_name.push_back(ch);
+  }
+  ss << "def " << func_name << "(debugger, command, exe_ctx, result, internal_dict):\n";
+  if (!cmd.docs().empty()) {
+    ss << "    \"\"\"" << cmd.docs() << "\"\"\"\n";
+  }
+  ss << "    cmd_name = '" << cmd.name() << "'\n"
+     << "    auto_args = ";
+  print_python_string_array(ss, cmd.auto_args());
+  ss << "\n"
+     << "    command_impl(debugger, command, exe_ctx, result, cmd_name, auto_args)\n"
+     << "\n"
+     << "lldb.debugger.HandleCommand('command script add -f " << func_name
+     << " " << cmd.name() << "')\n\n";
+}
+
+string DebuggerExtensionCommandHandler::lldb_python_macros() {
+  DebuggerExtensionCommand::init_auto_args();
+  stringstream ss;
+  ss << shared_python
+     << R"Delimiter(
+import lldb
+import re
+import shlex
+
+def run_command_and_get_output(debugger, command):
+    result = lldb.SBCommandReturnObject()
+    debugger.GetCommandInterpreter().HandleCommand(command, result)
+    assert result.Succeeded()
+    return result.GetOutput()
+
+def command_impl(debugger, command, exe_ctx, result, cmd_name, auto_args):
+    interpreter = debugger.GetCommandInterpreter()
+    args = shlex.split(command)
+    # Ensure lldb tells rr its current thread
+    curr_thread = exe_ctx.thread
+    cmd_prefix = ("process plugin packet send qRRCmd:%s:%d"%
+        (cmd_name, -1 if curr_thread is None else curr_thread.GetThreadID()))
+    arg_strs = []
+    for auto_arg in auto_args:
+        arg_strs.append(":" + hex_escape(run_command_and_get_output(debugger, auto_arg)))
+    for arg in args:
+        arg_strs.append(":" + hex_escape(arg))
+    rv = run_command_and_get_output(debugger, cmd_prefix + ''.join(arg_strs));
+    rv_match = re.search('response: (.*)$', rv, re.MULTILINE);
+    if not rv_match:
+        result.SetError(None, "Invalid response: %s" % rv)
+        return
+    response = hex_unescape(rv_match.group(1))
+    result.Print(response.strip())
+
+)Delimiter";
+
+  if (debugger_command_list) {
+    for (auto& it : *debugger_command_list) {
+      lldb_macro_binding(ss, *it);
+    }
+  }
+  return ss.str();
+}
+
+/*static*/ DebuggerExtensionCommand* DebuggerExtensionCommandHandler::command_for_name(const string& name) {
+  if (!debugger_command_list) {
     return nullptr;
   }
-  for (auto& it : *gdb_command_list) {
+  for (auto& it : *debugger_command_list) {
     if (it->name() == name) {
       return it;
     }
@@ -198,16 +276,16 @@ end
   return nullptr;
 }
 
-void GdbCommandHandler::register_command(GdbCommand& cmd) {
+void DebuggerExtensionCommandHandler::register_command(DebuggerExtensionCommand& cmd) {
   LOG(debug) << "registering command: " << cmd.name();
-  if (!gdb_command_list) {
-    gdb_command_list = new vector<GdbCommand*>();
+  if (!debugger_command_list) {
+    debugger_command_list = new vector<DebuggerExtensionCommand*>();
   }
-  gdb_command_list->push_back(&cmd);
+  debugger_command_list->push_back(&cmd);
 }
 
 // applies the simplest two hex character by byte encoding
-static string gdb_escape(const string& str) {
+static string hex_escape(const string& str) {
   stringstream ss;
   ss << hex;
   const size_t len = str.size();
@@ -223,7 +301,7 @@ static string gdb_escape(const string& str) {
 }
 // undo the two hex character byte encoding,
 // in case of error returns an empty string
-static string gdb_unescape(const string& str) {
+static string hex_unescape(const string& str) {
   const size_t len = str.size();
   // check for unexpected string length
   if (len % 2) {
@@ -243,17 +321,17 @@ static string gdb_unescape(const string& str) {
   return ss.str();
 }
 
-/* static */ string GdbCommandHandler::process_command(GdbServer& gdb_server,
+/* static */ string DebuggerExtensionCommandHandler::process_command(GdbServer& gdb_server,
                                                        Task* t,
                                                        const GdbRequest::RRCmd& rr_cmd) {
   vector<string> args;
   for (const auto& arg : rr_cmd.args) {
-    args.push_back(gdb_unescape(arg));
+    args.push_back(hex_unescape(arg));
   }
 
-  GdbCommand* cmd = command_for_name(rr_cmd.name);
+  DebuggerExtensionCommand* cmd = command_for_name(rr_cmd.name);
   if (!cmd) {
-    return gdb_escape(string() + "Command '" + rr_cmd.name + "' not found.\n");
+    return hex_escape(string() + "Command '" + rr_cmd.name + "' not found.\n");
   }
   LOG(debug) << "invoking command: " << cmd->name();
   Task* target = t->session().find_task(rr_cmd.target_tid);
@@ -263,13 +341,13 @@ static string gdb_unescape(const string& str) {
   
   string resp = cmd->invoke(gdb_server, target, args);
 
-  if (resp == GdbCommandHandler::cmd_end_diversion()) {
+  if (resp == DebuggerExtensionCommandHandler::cmd_end_diversion()) {
     LOG(debug) << "cmd must run outside of diversion (" << resp << ")";
     return resp;
   }
 
   LOG(debug) << "cmd response: " << resp;
-  return gdb_escape(resp + "\n");
+  return hex_escape(resp + "\n");
 }
 
 } // namespace rr

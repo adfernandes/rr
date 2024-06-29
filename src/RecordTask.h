@@ -149,9 +149,8 @@ public:
    * ptraced task has had its SIGCHLD sent.
    * Note that we can't set the correct siginfo when we send the signal, because
    * it requires us to set information only the kernel has permission to set.
-   * Returns false if this signal should be deferred.
    */
-  bool set_siginfo_for_synthetic_SIGCHLD(siginfo_t* si);
+  void set_siginfo_for_synthetic_SIGCHLD(siginfo_t* si);
   /**
    * Sets up |si| as if we're delivering a SIGCHLD/waitid for this waited task.
    */
@@ -723,6 +722,7 @@ public:
   // tracer attached via PTRACE_SEIZE
   bool emulated_ptrace_seized;
   WaitType in_wait_type;
+  int in_wait_options;
   pid_t in_wait_pid;
 
   // Signal handler state
@@ -795,6 +795,9 @@ public:
   // Stashed signal-delivery state, ready to be delivered at
   // next opportunity.
   std::deque<StashedSignal> stashed_signals;
+  // When true, we're blocking signals during a syscall to
+  // prevent new signals from being delivered. `blocked_sigs_dirty`
+  // is false and `blocked_sigs` contains the previous sigmask.
   bool stashed_signals_blocking_more_signals;
   bool stashed_group_stop;
   bool break_at_syscallbuf_traced_syscalls;

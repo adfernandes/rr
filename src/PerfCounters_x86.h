@@ -94,33 +94,52 @@ static CpuMicroarch compute_cpu_microarch() {
       return IntelSapphireRapid;
     case 0xc06f0:
       return IntelEmeraldRapid;
+    case 0xa06a0:
+      return IntelMeteorLake;
     case 0x30f00:
       return AMDF15R30;
-    case 0x00f10: // Naples, Whitehaven, Summit Ridge, Snowy Owl (Zen), Milan (Zen 3) (UNTESTED)
+    case 0x00f10: // A8-3530MX, Naples, Whitehaven, Summit Ridge, Snowy Owl (Zen), Milan (Zen 3) (UNTESTED)
+      if (ext_family == 8) {
+        return AMDZen;
+      } else if (ext_family == 0xa) {
+        return AMDZen3;
+      } else if (ext_family == 3) {
+        return AMDF15R30;
+      }
+      break;
+    case 0x00f80: // Colfax, Pinnacle Ridge (Zen+), Chagall (Zen3) (UNTESTED)
+      if (ext_family == 8) {
+        return AMDZen;
+      } else if (ext_family == 0xa) {
+        return AMDZen3;
+      }
+      break;
     case 0x10f10: // Raven Ridge, Great Horned Owl (Zen) (UNTESTED)
-    case 0x10f80: // Banded Kestrel (Zen), Picasso (Zen+) (UNTESTED)
+    case 0x10f80: // Banded Kestrel (Zen), Picasso (Zen+), 7975WX (Zen2)
     case 0x20f00: // Dali (Zen) (UNTESTED)
-    case 0x00f80: // Colfax, Pinnacle Ridge (Zen+) (UNTESTED)
+      if (ext_family == 8) {
+        return AMDZen;
+      } else if (ext_family == 0xa) {
+        return AMDZen2;
+      }
+      break;
     case 0x30f10: // Rome, Castle Peak (Zen 2)
     case 0x60f00: // Renoir (Zen 2) (UNTESTED)
     case 0x70f10: // Matisse (Zen 2) (UNTESTED)
-    case 0x60f80: // Lucienne
+    case 0x60f80: // Lucienne (Zen 2)
     case 0x90f00: // Van Gogh (Zen 2)
-      if (ext_family == 8 || ext_family == 0xa) {
-        return AMDZen;
-      } else if (ext_family == 3) {
-        return AMDF15R30;
+      if (ext_family == 8) {
+        return AMDZen2;
       }
       break;
     case 0x20f10: // Vermeer (Zen 3)
     case 0x50f00: // Cezanne (Zen 3)
     case 0x40f40: // Rembrandt (Zen 3+)
+      return AMDZen3;
     case 0x60f10: // Raphael (Zen 4)
     case 0x70f40: // Phoenix (Zen 4)
     case 0x70f50: // Hawk Point (Zen 4)
-      if (ext_family == 0xa) {
-        return AMDZen;
-      }
+      return AMDZen4;
     default:
       break;
   }
@@ -376,7 +395,7 @@ static void check_for_arch_bugs(perf_event_attrs &perf_attr) {
   if (uarch >= IntelCometlake && uarch <= LastIntel) {
     check_for_freeze_on_smi();
   }
-  if (uarch == AMDZen) {
+  if (uarch >= AMDZen && uarch <= LastAMD) {
     check_for_zen_speclockmap();
   }
 }

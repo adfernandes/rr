@@ -1,6 +1,6 @@
 /* -*- Mode: C++; tab-width: 8; c-basic-offset: 2; indent-tabs-mode: nil; -*- */
 
-#include "GdbCommand.h"
+#include "DebuggerExtensionCommand.h"
 
 #include "ReplayTask.h"
 #include "log.h"
@@ -9,13 +9,13 @@ using namespace std;
 
 namespace rr {
 
-static SimpleGdbCommand elapsed_time(
+static SimpleDebuggerExtensionCommand elapsed_time(
     "elapsed-time",
     "Print elapsed time (in seconds) since the start of the trace, in the"
     " 'record' timeline.",
     [](GdbServer&, Task* t, const vector<string>&) {
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
 
       ReplayTask* replay_t = static_cast<ReplayTask*>(t);
@@ -25,11 +25,11 @@ static SimpleGdbCommand elapsed_time(
       return string("Elapsed Time (s): ") + to_string(elapsed_time);
     });
 
-static SimpleGdbCommand when(
+static SimpleDebuggerExtensionCommand when(
     "when", "Print the number of the last completely replayed rr event.",
     [](GdbServer&, Task* t, const vector<string>&) {
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
       // The current event has not been completely replayed, so
       // we report the number of the previuos event.
@@ -38,20 +38,20 @@ static SimpleGdbCommand when(
                  static_cast<ReplayTask*>(t)->current_trace_frame().time() - 1);
     });
 
-static SimpleGdbCommand when_ticks(
+static SimpleDebuggerExtensionCommand when_ticks(
     "when-ticks", "Print the current rr tick count for the current thread.",
     [](GdbServer&, Task* t, const vector<string>&) {
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
       return string("Current tick: ") + to_string(t->tick_count());
     });
 
-static SimpleGdbCommand when_tid(
+static SimpleDebuggerExtensionCommand when_tid(
     "when-tid", "Print the real tid for the current thread.",
     [](GdbServer&, Task* t, const vector<string>&) {
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
       return string("Current tid: ") + to_string(t->tid);
     });
@@ -59,7 +59,7 @@ static SimpleGdbCommand when_tid(
 static std::vector<ReplayTimeline::Mark> back_stack;
 static ReplayTimeline::Mark current_history_cp;
 static std::vector<ReplayTimeline::Mark> forward_stack;
-static SimpleGdbCommand rr_history_push(
+static SimpleDebuggerExtensionCommand rr_history_push(
     "rr-history-push", "Push an entry into the rr history.",
     [](GdbServer& gdb_server, Task* t, const vector<string>&) {
       if (!gdb_server.timeline()) {
@@ -76,14 +76,14 @@ static SimpleGdbCommand rr_history_push(
       forward_stack.clear();
       return string();
     });
-static SimpleGdbCommand back(
+static SimpleDebuggerExtensionCommand back(
     "back", "Go back one entry in the rr history.",
     [](GdbServer& gdb_server, Task* t, const vector<string>&) {
       if (!gdb_server.timeline()) {
         return string("Command requires a full debugging session.");
       }
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
       if (back_stack.size() == 0) {
         return string("Can't go back. No more history entries.");
@@ -94,14 +94,14 @@ static SimpleGdbCommand back(
       gdb_server.timeline()->seek_to_mark(current_history_cp);
       return string();
     });
-static SimpleGdbCommand forward(
+static SimpleDebuggerExtensionCommand forward(
     "forward", "Go forward one entry in the rr history.",
     [](GdbServer& gdb_server, Task* t, const vector<string>&) {
       if (!gdb_server.timeline()) {
         return string("Command requires a full debugging session.");
       }
       if (!t->session().is_replaying()) {
-        return GdbCommandHandler::cmd_end_diversion();
+        return DebuggerExtensionCommandHandler::cmd_end_diversion();
       }
       if (forward_stack.size() == 0) {
         return string("Can't go forward. No more history entries.");
@@ -135,7 +135,7 @@ string invoke_checkpoint(GdbServer& gdb_server, Task*,
       *gdb_server.timeline(), gdb_server.last_continue_task, e, where);
   return string("Checkpoint ") + to_string(checkpoint_id) + " at " + where;
 }
-static SimpleGdbCommand checkpoint(
+static SimpleDebuggerExtensionCommand checkpoint(
   "checkpoint",
   "create a checkpoint representing a point in the execution\n"
   "use the 'restart' command to return to the checkpoint",
@@ -149,7 +149,11 @@ string invoke_delete_checkpoint(GdbServer& gdb_server, Task*,
   if (!gdb_server.timeline()) {
     return string("Command requires a full debugging session.");
   }
-  int id = stoi(args[0]);
+  char* endptr;
+  long id = strtol(args[0].c_str(), &endptr, 10);
+  if (*endptr) {
+    return string("Invalid checkpoint number ") + args[0] + ".";
+  }
   auto it = gdb_server.checkpoints.find(id);
   if (it != gdb_server.checkpoints.end()) {
     if (it->second.is_explicit == GdbServer::Checkpoint::EXPLICIT) {
@@ -161,7 +165,7 @@ string invoke_delete_checkpoint(GdbServer& gdb_server, Task*,
     return string("No checkpoint number ") + to_string(id) + ".";
   }
 }
-static SimpleGdbCommand delete_checkpoint(
+static SimpleDebuggerExtensionCommand delete_checkpoint(
   "delete checkpoint",
   "remove a checkpoint created with the 'checkpoint' command",
   invoke_delete_checkpoint);
@@ -178,13 +182,16 @@ string invoke_info_checkpoints(GdbServer& gdb_server, Task*,
   }
   return out;
 }
-static SimpleGdbCommand info_checkpoints(
+static SimpleDebuggerExtensionCommand info_checkpoints(
   "info checkpoints",
   "list all checkpoints created with the 'checkpoint' command",
   invoke_info_checkpoints);
 
-/*static*/ void GdbCommand::init_auto_args() {
-  checkpoint.add_auto_arg("rr-where");
+void DebuggerExtensionCommand::init_auto_args() {
+  static __attribute__((unused)) int dummy = []() {
+    checkpoint.add_auto_arg("rr-where");
+    return 0;
+  }();
 }
 
 } // namespace rr

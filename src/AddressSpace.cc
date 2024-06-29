@@ -244,7 +244,7 @@ AddressSpace::Mapping::Mapping(const Mapping& other)
 AddressSpace::Mapping::~Mapping() {}
 
 AddressSpace::Mapping AddressSpace::Mapping::subrange(MemoryRange range,
-    std::function<KernelMapping(const KernelMapping&)> f) {
+    std::function<KernelMapping(const KernelMapping&)> f) const {
   Mapping mapping(
         f(map.subrange(range.start(), range.end())),
         f(recorded_map.subrange(range.start(), range.end())),
@@ -1646,7 +1646,7 @@ static void assert_segments_match(Task* t, const KernelMapping& input_m,
     err = "starts differ";
   } else if (m.end() != km.end()) {
     err = "ends differ";
-  } else if (m.prot() != km.prot()) {
+  } else if ((m.prot() ^ km.prot()) & KernelMapping::checkable_prot_mask) {
     err = "prots differ";
   } else if ((m.flags() ^ km.flags()) & KernelMapping::checkable_flags_mask) {
     err = "flags differ";

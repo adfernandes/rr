@@ -20,7 +20,7 @@
 #include "BreakpointCondition.h"
 #include "ElfReader.h"
 #include "Event.h"
-#include "GdbCommandHandler.h"
+#include "DebuggerExtensionCommandHandler.h"
 #include "GdbServerExpression.h"
 #include "ReplaySession.h"
 #include "ReplayTask.h"
@@ -88,7 +88,7 @@ GdbServer::GdbServer(std::unique_ptr<GdbServerConnection>& connection,
  * value that can be named by |regname|.
  */
 static size_t get_reg(const Registers& regs, const ExtraRegisters& extra_regs,
-                      uint8_t* buf, GdbRegister regname, bool* defined) {
+                      uint8_t* buf, GdbServerRegister regname, bool* defined) {
   size_t num_bytes = regs.read_register(buf, regname, defined);
   if (!*defined) {
     num_bytes = extra_regs.read_register(buf, regname, defined);
@@ -96,7 +96,7 @@ static size_t get_reg(const Registers& regs, const ExtraRegisters& extra_regs,
   return num_bytes;
 }
 
-static bool set_reg(Task* target, const GdbRegisterValue& reg) {
+static bool set_reg(Task* target, const GdbServerRegisterValue& reg) {
   if (!reg.defined) {
     return false;
   }
@@ -122,10 +122,10 @@ static bool set_reg(Task* target, const GdbRegisterValue& reg) {
 /**
  * Return the register |which|, which may not have a defined value.
  */
-GdbRegisterValue GdbServer::get_reg(const Registers& regs,
+GdbServerRegisterValue GdbServer::get_reg(const Registers& regs,
                                     const ExtraRegisters& extra_regs,
-                                    GdbRegister which) {
-  GdbRegisterValue reg;
+                                    GdbServerRegister which) {
+  GdbServerRegisterValue reg;
   memset(&reg, 0, sizeof(reg));
   reg.name = which;
   reg.size = rr::get_reg(regs, extra_regs, &reg.value[0], which, &reg.defined);
@@ -186,7 +186,7 @@ static void maybe_singlestep_for_event(Task* t, GdbRequest* req) {
 
 void GdbServer::dispatch_regs_request(const Registers& regs,
                                       const ExtraRegisters& extra_regs) {
-  GdbRegister end;
+  GdbServerRegister end;
   // Send values for all the registers we sent XML register descriptions for.
   // Those descriptions are controlled by GdbServerConnection::cpu_features().
   bool have_PKU = dbg->cpu_features() & GdbServerConnection::CPU_PKU;
@@ -205,8 +205,8 @@ void GdbServer::dispatch_regs_request(const Registers& regs,
       FATAL() << "Unknown architecture";
       return;
   }
-  vector<GdbRegisterValue> rs;
-  for (GdbRegister r = GdbRegister(0); r <= end; r = GdbRegister(r + 1)) {
+  vector<GdbServerRegisterValue> rs;
+  for (GdbServerRegister r = GdbServerRegister(0); r <= end; r = GdbServerRegister(r + 1)) {
     rs.push_back(get_reg(regs, extra_regs, r));
   }
   dbg->reply_get_regs(rs);
@@ -638,7 +638,7 @@ void GdbServer::dispatch_debugger_request(Session& session,
       return;
     }
     case DREQ_GET_REG: {
-      GdbRegisterValue reg =
+      GdbServerRegisterValue reg =
           get_reg(target->regs(), *target->extra_regs_fallible(), req.reg().name);
       dbg->reply_get_reg(reg);
       return;
@@ -794,7 +794,7 @@ void GdbServer::dispatch_debugger_request(Session& session,
     }
     case DREQ_RR_CMD:
       dbg->reply_rr_cmd(
-          GdbCommandHandler::process_command(*this, target, req.rr_cmd()));
+          DebuggerExtensionCommandHandler::process_command(*this, target, req.rr_cmd()));
       return;
 #ifdef PROC_SERVICE_H
     case DREQ_QSYMBOL: {
@@ -961,10 +961,10 @@ bool GdbServer::diverter_process_debugger_requests(
         Task* task = diversion_session.find_task(last_continue_task.tuid);
         if (task) {
           std::string reply =
-              GdbCommandHandler::process_command(*this, task, req->rr_cmd());
+              DebuggerExtensionCommandHandler::process_command(*this, task, req->rr_cmd());
           // Certain commands cause the diversion to end immediately
           // while other commands must work within a diversion.
-          if (reply == GdbCommandHandler::cmd_end_diversion()) {
+          if (reply == DebuggerExtensionCommandHandler::cmd_end_diversion()) {
             diversion_refcount = 0;
             return false;
           }
@@ -1946,6 +1946,7 @@ static bool is_likely_interp(string fsname) {
 #endif
 }
 
+#ifndef __BIONIC__
 static remote_ptr<void> base_addr_from_rendezvous(Task* t, string fname)
 {
   remote_ptr<void> interpreter_base = t->vm()->saved_interpreter_base();
@@ -1987,6 +1988,7 @@ static remote_ptr<void> base_addr_from_rendezvous(Task* t, string fname)
   }
   return nullptr;
 }
+#endif
 
 int GdbServer::open_file(Session& session, Task* continue_task, const std::string& file_name) {
   // XXX should we require file_scope_pid == 0 here?
@@ -2062,6 +2064,7 @@ int GdbServer::open_file(Session& session, Task* continue_task, const std::strin
     // Last ditch attempt: Dig through the tracee's libc rendezvous struct to
     // see if we can find this file by a different name (e.g. if it was opened
     // via symlink)
+#ifndef __BIONIC__
     remote_ptr<void> base = base_addr_from_rendezvous(continue_task, file_name);
     if (base != nullptr && continue_task->vm()->has_mapping(base)) {
       int ret_fd = 0;
@@ -2072,6 +2075,7 @@ int GdbServer::open_file(Session& session, Task* continue_task, const std::strin
       memory_files.insert(make_pair(ret_fd, FileId(continue_task->vm()->mapping_of(base).recorded_map)));
       return ret_fd;
     }
+#endif
     LOG(debug) << "... not found";
     return -1;
    }

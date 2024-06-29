@@ -56,6 +56,7 @@ public:
                                     MAP_PRIVATE | MAP_SHARED | MAP_STACK |
                                     MAP_GROWSDOWN;
   static const int checkable_flags_mask = MAP_PRIVATE | MAP_SHARED;
+  static const int checkable_prot_mask = PROT_READ | PROT_WRITE | PROT_EXEC;
   static const dev_t NO_DEVICE = 0;
   static const ino_t NO_INODE = 0;
 
@@ -152,6 +153,9 @@ public:
   bool is_stack() const { return fsname().find("[stack") == 0; }
   bool is_vvar() const { return fsname() == "[vvar]"; }
   bool is_vsyscall() const { return fsname() == "[vsyscall]"; }
+  bool is_named_anonymous() const {
+    return fsname().find("[anon:") == 0 || fsname().find("[anon_shmem:") == 0;
+  }
 
   struct stat fake_stat() const {
     struct stat fake_stat;
@@ -278,7 +282,7 @@ public:
       return *this;
     }
     Mapping subrange(MemoryRange range,
-                     std::function<KernelMapping(const KernelMapping&)> f);
+                     std::function<KernelMapping(const KernelMapping&)> f) const;
 
     const KernelMapping map;
     // The corresponding KernelMapping in the recording. During recording,

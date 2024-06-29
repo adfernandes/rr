@@ -23,7 +23,7 @@
 namespace rr {
 
 class GdbServer {
-  // Not ideal but we can't inherit friend from GdbCommand
+  // Not ideal but we can't inherit friend from DebuggerExtensionCommand
   friend std::string invoke_checkpoint(GdbServer&, Task*,
                                        const std::vector<std::string>&);
   friend std::string invoke_delete_checkpoint(GdbServer&, Task*,
@@ -75,9 +75,9 @@ public:
   /**
    * Return the register |which|, which may not have a defined value.
    */
-  static GdbRegisterValue get_reg(const Registers& regs,
+  static GdbServerRegisterValue get_reg(const Registers& regs,
                                   const ExtraRegisters& extra_regs,
-                                  GdbRegister which);
+                                  GdbServerRegister which);
 
   // Null if this is an emergency debug session.
   ReplayTimeline* timeline() { return timeline_; }
